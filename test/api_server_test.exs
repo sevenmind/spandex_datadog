@@ -100,6 +100,10 @@ defmodule SpandexDatadog.ApiServerTest do
   end
 
   describe "ApiServer.start_link/1" do
+    test "accepts :sample_rate as a float in range" do
+      {:ok, _pid} = ApiServer.start_link(sample_rate: 0.2)
+    end
+    
     test "raises ArgumentError if :sample_rate is invalid" do
       assert_raise ArgumentError, ":sample_rate must be a float between [0.0, 1.0]", fn ->
         ApiServer.start_link(sample_rate: 12)

@@ -74,8 +74,8 @@ defmodule SpandexDatadog.ApiServer do
   @spec start_link(opts :: Keyword.t()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     case Keyword.fetch(opts, :sample_rate) do
-      :error -> nil
-      {:ok, sample_rate} when sample_rate in [0.0, 1.0] -> nil
+      :error -> :ok
+      {:ok, sample_rate} when sample_rate >= 0.0 and sample_rate <= 1.0 -> :ok
       _problem -> raise ArgumentError, ":sample_rate must be a float between [0.0, 1.0]"
     end
 
