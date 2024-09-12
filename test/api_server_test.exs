@@ -326,7 +326,7 @@ defmodule SpandexDatadog.ApiServerTest do
         }
       ]
 
-      assert response =~ ~r/Trace response: {:error, %HTTPoison.Error{id: :foo, reason: :bar}}/
+      assert response =~ ~r/Trace response: {:error, %HTTPoison.Error{reason: :bar, id: :foo}}/
       assert_received {:put_datadog_spans, ^formatted, ^url, _}
     end
   end
