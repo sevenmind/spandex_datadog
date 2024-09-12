@@ -28,7 +28,8 @@ defmodule SpandexDatadog.ApiServer do
       :sync_threshold,
       :agent_pid,
       :container_id,
-      :trap_exits?
+      :trap_exits?,
+      :sample_rate
     ]
   end
 
@@ -51,7 +52,8 @@ defmodule SpandexDatadog.ApiServer do
     sync_threshold: 20,
     trap_exits?: false,
     name: __MODULE__,
-    api_adapter: SpandexDatadog.ApiServer
+    api_adapter: SpandexDatadog.ApiServer,
+    sample_rate: 1.0
   ]
 
   @doc """
@@ -65,11 +67,18 @@ defmodule SpandexDatadog.ApiServer do
   * `:verbose?` - Only to be used for debugging: All finished traces will be logged. Defaults to `false`
   * `:batch_size` - The number of traces that should be sent in a single batch. Defaults to `10`.
   * `:sync_threshold` - The maximum number of processes that may be sending traces at any one time. This adds backpressure. Defaults to `20`.
+  * `:sample_rate` - The percentage of traces to be sent to DataDog, expressed as `[0.0, 1.0]`. Defaults to `1.0` (100%).
   * `:name` - The name the GenServer should have. Currently only used for testing. Defaults to `SpandexDatadog.ApiServer`
   * `:trap_exits?` - Whether or not to trap exits and attempt to flush traces on shutdown, defaults to `false`. Useful if you do frequent deploys and you don't want to lose traces each deploy.
   """
   @spec start_link(opts :: Keyword.t()) :: GenServer.on_start()
   def start_link(opts \\ []) do
+    case Keyword.fetch(opts, :sample_rate) do
+      :error -> nil
+      {:ok, sample_rate} when sample_rate in [0.0, 1.0] -> nil
+      _problem -> raise ArgumentError, ":sample_rate must be a float between [0.0, 1.0]"
+    end
+
     opts = Keyword.merge(@default_opts, opts)
 
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -93,6 +102,7 @@ defmodule SpandexDatadog.ApiServer do
       waiting_traces: [],
       batch_size: opts[:batch_size],
       sync_threshold: opts[:sync_threshold],
+      sample_rate: opts[:sample_rate],
       agent_pid: agent_pid,
       container_id: get_container_id()
     }
@@ -141,7 +151,7 @@ defmodule SpandexDatadog.ApiServer do
   def handle_call({:send_trace, trace}, _from, state) do
     state =
       state
-      |> enqueue_trace(trace)
+      |> maybe_enqueue_trace(trace)
       |> maybe_flush_traces()
 
     {:reply, :ok, state}
@@ -225,12 +235,20 @@ defmodule SpandexDatadog.ApiServer do
 
   # Private Helpers
 
-  defp enqueue_trace(state, trace) do
-    if state.verbose? do
-      Logger.info(fn -> "Adding trace to stack with #{Enum.count(trace.spans)} spans" end)
-    end
+  defp maybe_enqueue_trace(state, trace) do
+    cond do
+      Enum.any?(trace.spans, &(error(&1.error) != 0)) ->
+        if state.verbose?, do: Logger.info("Adding trace to stack because it contains an error span")
+        %State{state | waiting_traces: [trace | state.waiting_traces]}
 
-    %State{state | waiting_traces: [trace | state.waiting_traces]}
+      :rand.uniform() > state.sample_rate ->
+        if state.verbose?, do: Logger.info("Dropping trace due to #{state.sample_rate} sample rate")
+        state
+
+      true ->
+        if state.verbose?, do: Logger.info("Adding trace to stack with #{Enum.count(trace.spans)} spans")
+        %State{state | waiting_traces: [trace | state.waiting_traces]}
+    end
   end
 
   defp maybe_flush_traces(%{waiting_traces: traces, batch_size: size} = state) when length(traces) < size do
