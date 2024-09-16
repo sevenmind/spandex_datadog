@@ -92,10 +92,31 @@ defmodule SpandexDatadog.ApiServerTest do
           verbose?: false,
           waiting_traces: [],
           batch_size: 1,
+          sample_rate: 1.0,
           agent_pid: agent_pid
         }
       ]
     }
+  end
+
+  describe "ApiServer.start_link/1" do
+    test "accepts :sample_rate as a float in range" do
+      {:ok, _pid} = ApiServer.start_link(sample_rate: 0.2)
+    end
+    
+    test "raises ArgumentError if :sample_rate is invalid" do
+      assert_raise ArgumentError, ":sample_rate must be a float between [0.0, 1.0]", fn ->
+        ApiServer.start_link(sample_rate: 12)
+      end
+
+      assert_raise ArgumentError, ":sample_rate must be a float between [0.0, 1.0]", fn ->
+        ApiServer.start_link(sample_rate: -0.2)
+      end
+
+      assert_raise ArgumentError, ":sample_rate must be a float between [0.0, 1.0]", fn ->
+        ApiServer.start_link(sample_rate: "0.2")
+      end
+    end
   end
 
   describe "ApiServer.send_trace/2" do
@@ -242,6 +263,51 @@ defmodule SpandexDatadog.ApiServerTest do
       assert_received {:put_datadog_spans, ^formatted, ^url, ^headers}
     end
 
+    test "only sends configured percentage of samples", %{trace: trace, state: state} do
+      :rand.seed(:default, 3_219_876)
+      state = %ApiServer.State{state | sample_rate: 0.5, verbose?: true}
+
+      log =
+        capture_log(fn ->
+          ApiServer.handle_call({:send_trace, trace}, self(), state)
+        end)
+
+      assert log =~ "Adding trace to stack with 3 spans"
+      assert_received {:put_datadog_spans, _, _, _}
+
+      log =
+        capture_log(fn ->
+          ApiServer.handle_call({:send_trace, trace}, self(), state)
+        end)
+
+      assert log =~ "Dropping trace due to 0.5 sample rate"
+      refute_received {:put_datadog_spans, _, _, _}
+
+      log =
+        capture_log(fn ->
+          ApiServer.handle_call({:send_trace, trace}, self(), state)
+        end)
+
+      assert log =~ "Adding trace to stack with 3 spans"
+      assert_received {:put_datadog_spans, _, _, _}
+    end
+
+    test "always sends samples with errors", %{trace: %{spans: [span | _rest]}, state: state} do
+      state = %ApiServer.State{state | sample_rate: 0.0, verbose?: true}
+
+      exception = RuntimeError.exception("boom")
+      span = %Span{span | error: [exception: exception]}
+      trace = %Trace{spans: [span]}
+
+      log =
+        capture_log(fn ->
+          ApiServer.handle_call({:send_trace, trace}, self(), state)
+        end)
+
+      assert log =~ "Adding trace to stack because it contains an error span"
+      assert_received {:put_datadog_spans, _, _, _}
+    end
+
     test "doesn't care about the response result", %{trace: trace, state: state, url: url} do
       state =
         state
@@ -326,7 +392,7 @@ defmodule SpandexDatadog.ApiServerTest do
         }
       ]
 
-      assert response =~ ~r/Trace response: {:error, %HTTPoison.Error{id: :foo, reason: :bar}}/
+      assert response =~ ~r/Trace response: {:error, %HTTPoison.Error{reason: :bar, id: :foo}}/
       assert_received {:put_datadog_spans, ^formatted, ^url, _}
     end
   end
